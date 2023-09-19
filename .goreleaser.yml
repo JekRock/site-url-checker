@@ -1,5 +1,5 @@
-signs:
-  - artifacts: checksum
+# signs:
+#   - artifacts: checksum
 
 project_name: site-url-checker
 dist: .bin
