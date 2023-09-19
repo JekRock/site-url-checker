@@ -45,5 +45,4 @@ archives:
     files:
       - LICENSE
       - README.md
-      - site-url-checker.1
     rlcp: true
