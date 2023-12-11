@@ -20,6 +20,8 @@ import (
 	"github.com/cenkalti/backoff/v4"
 	"github.com/corpix/uarand"
 	"github.com/schollz/progressbar/v3"
+
+	"github.com/jimsmart/grobotstxt"
 )
 
 func lineCounter(r io.Reader) (int, error) {
@@ -51,6 +53,7 @@ type resource struct {
 	status          string
 	redirectsNumber int
 	finalURL        string
+	robotsTxtStatus string
 	err             error
 }
 
@@ -127,7 +130,7 @@ func (r *resource) Request(userAgent *string) {
 
 }
 
-func requester(in <-chan *resource, out chan<- *resource, userAgent *string, isRandomUA bool) {
+func requester(in <-chan *resource, out chan<- *resource, userAgent *string, isRandomUA bool, robotsTxtBody, robotsTxtUserAgent *string) {
 	for r := range in {
 		backoff.Retry(func() error {
 			ua := userAgent
@@ -140,6 +143,16 @@ func requester(in <-chan *resource, out chan<- *resource, userAgent *string, isR
 			r.Request(ua)
 			if r.status == "429" || r.status == "405" {
 				return errors.New("429 or 405")
+			}
+
+			if *robotsTxtBody != "" {
+				allowed := grobotstxt.AgentAllowed(*robotsTxtBody, *robotsTxtUserAgent, r.url)
+
+				if !allowed {
+					r.robotsTxtStatus = "disallowed"
+				} else {
+					r.robotsTxtStatus = "allowed"
+				}
 			}
 
 			return nil
@@ -159,7 +172,7 @@ func requester(in <-chan *resource, out chan<- *resource, userAgent *string, isR
 }
 
 func serializer(in <-chan *resource, wg *sync.WaitGroup, writer *csv.Writer) {
-	writer.Write([]string{"url", "status", "redirects number", "final URL", "error"})
+	writer.Write([]string{"url", "status", "redirects number", "final URL", "allowed by robots.txt", "error"})
 
 	for r := range in {
 		errString := ""
@@ -172,18 +185,62 @@ func serializer(in <-chan *resource, wg *sync.WaitGroup, writer *csv.Writer) {
 			r.status = "err"
 		}
 
-		writer.Write([]string{r.url, r.status, strconv.Itoa(r.redirectsNumber), r.finalURL, errString})
+		writer.Write([]string{r.url, r.status, strconv.Itoa(r.redirectsNumber), r.finalURL, r.robotsTxtStatus, errString})
 
 		wg.Done()
 	}
 }
 
-func parseUrls(urlsFilePath, outputFilePath string, numWorkers int, userAgent *string, isRandomUA bool) {
+// getRobotsTxtBody returns the body of robots.txt file
+//
+// if robotsTxt is a URL, it will be downloaded and returned as string
+//
+// if robotsTxt is a filesystem path, it will be read and returned as string
+func getRobotsTxtBody(robotsTxt string) (string, error) {
+	if robotsTxt == "" {
+		return "", nil
+	}
+
+	robotsTxtURL, err := url.Parse(robotsTxt)
+	if err != nil {
+		return "", err
+	}
+
+	var robotsTxtBody []byte
+
+	if robotsTxtURL.Scheme == "" {
+		robotsTxtBody, err = os.ReadFile(robotsTxt)
+		if err != nil {
+			return "", err
+		}
+	} else {
+		res, err := http.Get(robotsTxt)
+		if err != nil {
+			return "", err
+		}
+
+		robotsTxtBody, err = io.ReadAll(res.Body)
+		if err != nil {
+			return "", err
+		}
+
+	}
+
+	return string(robotsTxtBody), nil
+}
+
+func parseUrls(urlsFilePath, outputFilePath string, numWorkers int, userAgent *string, isRandomUA bool, robotsTxt, robotsTxtUserAgent *string) {
+	robotsTxtBody, err := getRobotsTxtBody(*robotsTxt)
+
+	if err != nil {
+		panic(err)
+	}
+
 	var wg sync.WaitGroup
 	pending, complete := make(chan *resource), make(chan *resource)
 
 	for i := 0; i < numWorkers; i++ {
-		go requester(pending, complete, userAgent, isRandomUA)
+		go requester(pending, complete, userAgent, isRandomUA, &robotsTxtBody, robotsTxtUserAgent)
 	}
 
 	csvFile, err := os.Create(outputFilePath)
@@ -248,6 +305,8 @@ func main() {
 	numWorkers := flag.Int("numWorkers", 1, "number of parallel workers to make requests")
 	userAgentString := flag.String("userAgent", userAgentDefault, "user agent string sent with every request")
 	isRandomUA := flag.Bool("randomUserAgent", false, "If set to 'true' every request will have random user agent and 'userAgentString' flag will be ignored")
+	robotsTxt := flag.String("robotsTxt", "", "path to robots.txt. Either URL or filesystem path. If set, the script will check if the URL is allowed to be crawled")
+	robotsTxtUserAgent := flag.String("robotsTxtUserAgent", userAgentDefault, "user agent string used to validate robots.txt")
 
 	flag.Parse()
 
@@ -257,5 +316,5 @@ func main() {
 	// }
 
 	fmt.Printf("Starting at %s\n", time.Now().Format(time.RFC850))
-	parseUrls(*urlsFilePath, *outputFilePath, *numWorkers, userAgentString, *isRandomUA)
+	parseUrls(*urlsFilePath, *outputFilePath, *numWorkers, userAgentString, *isRandomUA, robotsTxt, robotsTxtUserAgent)
 }
