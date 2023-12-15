@@ -1,4 +1,4 @@
-module main
+module github.com/JekRock/site-url-checker
 
 go 1.20
 

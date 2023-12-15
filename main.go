@@ -4,7 +4,6 @@ import (
 	"bufio"
 	"bytes"
 	"encoding/csv"
-	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -12,16 +11,14 @@ import (
 	"net/url"
 	"os"
 	"os/signal"
-	"strconv"
 	"sync"
 	"syscall"
 	"time"
 
-	"github.com/cenkalti/backoff/v4"
-	"github.com/corpix/uarand"
-	"github.com/schollz/progressbar/v3"
+	"github.com/JekRock/site-url-checker/pkg/requester"
+	"github.com/JekRock/site-url-checker/pkg/serializer"
 
-	"github.com/jimsmart/grobotstxt"
+	"github.com/schollz/progressbar/v3"
 )
 
 func lineCounter(r io.Reader) (int, error) {
@@ -45,151 +42,7 @@ func lineCounter(r io.Reader) (int, error) {
 
 const (
 	userAgentDefault = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:109.0) Gecko/20100101 Firefox/109.0"
-	maxRedirects     = 10
 )
-
-type resource struct {
-	url             string
-	status          string
-	redirectsNumber int
-	finalURL        string
-	robotsTxtStatus string
-	err             error
-}
-
-var client = &http.Client{
-	Timeout: 1 * time.Minute,
-	CheckRedirect: func(req *http.Request, via []*http.Request) error {
-		return http.ErrUseLastResponse
-	},
-}
-
-func (r *resource) Request(userAgent *string) {
-	r.finalURL = "" //  clean first as it may have URL left from previous 405
-
-	req, err := http.NewRequest(http.MethodHead, r.url, http.NoBody)
-	if err != nil {
-		r.err = err
-		return
-	}
-
-	req.Header.Add("User-Agent", *userAgent)
-
-	res, err := client.Do(req)
-	if err != nil {
-		r.err = err
-		return
-	}
-
-	for res.StatusCode == 301 || res.StatusCode == 302 {
-		r.redirectsNumber++
-
-		if r.redirectsNumber > maxRedirects {
-			r.err = errors.New("max redirects number reached")
-			r.status = "-1"
-			return
-		}
-
-		urlObj, err := url.Parse(res.Header.Get("Location"))
-		if err != nil {
-			r.err = err
-			return
-		}
-
-		if !urlObj.IsAbs() {
-			// originalUrl, _ := url.Parse(r.url)
-			// url.Host = originalUrl.Host
-			urlObj.Host = res.Request.Host
-			urlObj.Scheme = "https"
-		}
-
-		req, err := http.NewRequest(http.MethodHead, urlObj.String(), http.NoBody)
-		if err != nil {
-			r.err = err
-			return
-		}
-
-		req.Header.Add("User-Agent", *userAgent)
-
-		res, err = client.Do(req)
-		if err != nil {
-			r.err = err
-			return
-		}
-
-		if res.StatusCode == 405 {
-			break
-		}
-	}
-
-	if r.redirectsNumber > 0 {
-		r.finalURL = res.Request.URL.String()
-	}
-
-	r.status = strconv.Itoa(res.StatusCode)
-
-}
-
-func requester(in <-chan *resource, out chan<- *resource, userAgent *string, isRandomUA bool, robotsTxtBody, robotsTxtUserAgent *string) {
-	for r := range in {
-		backoff.Retry(func() error {
-			ua := userAgent
-
-			if isRandomUA {
-				randomUA := uarand.GetRandom()
-				ua = &randomUA
-			}
-
-			r.Request(ua)
-			if r.status == "429" || r.status == "405" {
-				return errors.New("429 or 405")
-			}
-
-			if *robotsTxtBody != "" {
-				allowed := grobotstxt.AgentAllowed(*robotsTxtBody, *robotsTxtUserAgent, r.url)
-
-				if !allowed {
-					r.robotsTxtStatus = "disallowed"
-				} else {
-					r.robotsTxtStatus = "allowed"
-				}
-			}
-
-			return nil
-
-		}, &backoff.ExponentialBackOff{
-			InitialInterval:     1 * time.Second,
-			MaxInterval:         60 * time.Second,
-			MaxElapsedTime:      2 * time.Minute,
-			RandomizationFactor: 0.5,
-			Multiplier:          0.5,
-			Stop:                -1,
-			Clock:               backoff.SystemClock,
-		})
-
-		out <- r
-	}
-}
-
-func serializer(in <-chan *resource, wg *sync.WaitGroup, writer *csv.Writer) {
-	writer.Write([]string{"url", "status", "redirects number", "final URL", "allowed by robots.txt", "error"})
-
-	for r := range in {
-		errString := ""
-
-		if r.err != nil {
-			errString = r.err.Error()
-		}
-
-		if r.status == "" {
-			r.status = "err"
-		}
-
-		writer.Write([]string{r.url, r.status, strconv.Itoa(r.redirectsNumber), r.finalURL, r.robotsTxtStatus, errString})
-
-		wg.Done()
-	}
-}
 
 // getRobotsTxtBody returns the body of robots.txt file
 //
@@ -237,10 +90,10 @@ func parseUrls(urlsFilePath, outputFilePath string, numWorkers int, userAgent *s
 	}
 
 	var wg sync.WaitGroup
-	pending, complete := make(chan *resource), make(chan *resource)
+	pending, complete := make(chan *requester.Resource), make(chan *requester.Resource)
 
 	for i := 0; i < numWorkers; i++ {
-		go requester(pending, complete, userAgent, isRandomUA, &robotsTxtBody, robotsTxtUserAgent)
+		go requester.Requester(pending, complete, userAgent, isRandomUA, &robotsTxtBody, robotsTxtUserAgent)
 	}
 
 	csvFile, err := os.Create(outputFilePath)
@@ -254,7 +107,9 @@ func parseUrls(urlsFilePath, outputFilePath string, numWorkers int, userAgent *s
 
 	defer writer.Flush()
 
-	go serializer(complete, &wg, writer)
+	sz := serializer.CSVSerializer{Writer: writer, Wg: &wg, In: complete}
+
+	go sz.Serialize()
 
 	file, err := os.Open(urlsFilePath)
 	if err != nil {
@@ -288,7 +143,7 @@ func parseUrls(urlsFilePath, outputFilePath string, numWorkers int, userAgent *s
 
 	for scanner.Scan() {
 		wg.Add(1)
-		pending <- &resource{url: scanner.Text()}
+		pending <- &requester.Resource{Url: scanner.Text()}
 		bar.Add(1)
 	}
 
@@ -309,11 +164,6 @@ func main() {
 	robotsTxtUserAgent := flag.String("robotsTxtUserAgent", userAgentDefault, "user agent string used to validate robots.txt")
 
 	flag.Parse()
-
-	// if flag.NFlag() == 0 {
-	// 	flag.PrintDefaults()
-	// 	return
-	// }
 
 	fmt.Printf("Starting at %s\n", time.Now().Format(time.RFC850))
 	parseUrls(*urlsFilePath, *outputFilePath, *numWorkers, userAgentString, *isRandomUA, robotsTxt, robotsTxtUserAgent)
