@@ -11,6 +11,8 @@ import (
 	"net/url"
 	"os"
 	"os/signal"
+	"regexp"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -82,8 +84,44 @@ func getRobotsTxtBody(robotsTxt string) (string, error) {
 	return string(robotsTxtBody), nil
 }
 
-func parseUrls(urlsFilePath, outputFilePath string, numWorkers int, userAgent *string, isRandomUA bool, robotsTxt, robotsTxtUserAgent *string) {
+func loadIgnorePatterns(filepath string) ([]*regexp.Regexp, error) {
+	if filepath == "" {
+		return nil, nil
+	}
+
+	file, err := os.Open(filepath)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+
+	var patterns []*regexp.Regexp
+	scanner := bufio.NewScanner(file)
+
+	for scanner.Scan() {
+		rule := scanner.Text()
+		if rule == "" || strings.HasPrefix(rule, "#") {
+			continue
+		}
+
+		pattern, err := regexp.Compile(rule)
+		if err != nil {
+			return nil, fmt.Errorf("invalid regex pattern '%s': %v", rule, err)
+		}
+		patterns = append(patterns, pattern)
+	}
+
+	return patterns, scanner.Err()
+}
+
+func parseUrls(urlsFilePath, outputFilePath, ignoreRulesPath string, numWorkers int, userAgent *string, isRandomUA bool, robotsTxt, robotsTxtUserAgent *string) {
 	robotsTxtBody, err := getRobotsTxtBody(*robotsTxt)
+
+	if err != nil {
+		panic(err)
+	}
+
+	ignorePatterns, err := loadIgnorePatterns(ignoreRulesPath)
 
 	if err != nil {
 		panic(err)
@@ -142,8 +180,24 @@ func parseUrls(urlsFilePath, outputFilePath string, numWorkers int, userAgent *s
 	}()
 
 	for scanner.Scan() {
+		inputURL := scanner.Text()
+
+		if ignorePatterns != nil {
+			shouldSkip := false
+			for _, pattern := range ignorePatterns {
+				if pattern.MatchString(inputURL) {
+					shouldSkip = true
+					break
+				}
+			}
+			if shouldSkip {
+				bar.Add(1)
+				continue
+			}
+		}
+
 		wg.Add(1)
-		pending <- &requester.Resource{Url: scanner.Text()}
+		pending <- &requester.Resource{Url: inputURL}
 		bar.Add(1)
 	}
 
@@ -157,6 +211,7 @@ func main() {
 
 	urlsFilePath := flag.String("urls", "urls.txt", "path to file with URLs to check")
 	outputFilePath := flag.String("output", "output.csv", "path to output CSV file. If file exists, the content will be overridden")
+	ignoreRulesPath := flag.String("ignoreRules", "", "path to file containing regex ignore rules (one per line)")
 	numWorkers := flag.Int("numWorkers", 1, "number of parallel workers to make requests")
 	userAgentString := flag.String("userAgent", userAgentDefault, "user agent string sent with every request")
 	isRandomUA := flag.Bool("randomUserAgent", false, "If set to 'true' every request will have random user agent and 'userAgentString' flag will be ignored")
@@ -166,5 +221,5 @@ func main() {
 	flag.Parse()
 
 	fmt.Printf("Starting at %s\n", time.Now().Format(time.RFC850))
-	parseUrls(*urlsFilePath, *outputFilePath, *numWorkers, userAgentString, *isRandomUA, robotsTxt, robotsTxtUserAgent)
+	parseUrls(*urlsFilePath, *outputFilePath, *ignoreRulesPath, *numWorkers, userAgentString, *isRandomUA, robotsTxt, robotsTxtUserAgent)
 }
