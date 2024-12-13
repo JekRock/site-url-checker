@@ -6,7 +6,7 @@
 
 ### Prerequisites and Main Dependencies
 
-- [Golang](https://go.dev/) (1.20+)
+- [Golang](https://go.dev/) (1.23+)
 - Make
 
 ### Installation
@@ -28,6 +28,8 @@ make build-linux
 ```bash
 $ ./site-url-checker -h
 Usage of ./site-url-checker:
+  -ignoreRules string
+     path to file containing regex ignore rules (one per line)
   -numWorkers int
      number of parallel workers to make requests (default 1)
   -output string
