@@ -1,6 +1,7 @@
 # signs:
 #   - artifacts: checksum
 
+version: 2
 project_name: site-url-checker
 dist: .bin
 builds:
@@ -31,18 +32,17 @@ builds:
 archives:
   - id: site-url-checker
     name_template: >-
-     {{.ProjectName}}_
-     {{- .Tag}}_
-     {{- if eq .Os "darwin"}}macos
-     {{- else if eq .Os "windows"}}win
-     {{- else}}{{.Os}}{{end}}_
-     {{- if eq .Arch "amd64"}}x86_64
-     {{- else if eq .Arch "386"}}i386
-     {{- else}}{{.Arch}}{{end}}
+      {{.ProjectName}}_
+      {{- .Tag}}_
+      {{- if eq .Os "darwin"}}macos
+      {{- else if eq .Os "windows"}}win
+      {{- else}}{{.Os}}{{end}}_
+      {{- if eq .Arch "amd64"}}x86_64
+      {{- else if eq .Arch "386"}}i386
+      {{- else}}{{.Arch}}{{end}}
     format_overrides:
       - goos: windows
         format: zip
     files:
       - LICENSE
       - README.md
-    rlcp: true

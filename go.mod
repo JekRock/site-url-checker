@@ -1,6 +1,6 @@
 module github.com/JekRock/site-url-checker
 
-go 1.23.4
+go 1.23
 
 require (
 	github.com/cenkalti/backoff/v4 v4.3.0
